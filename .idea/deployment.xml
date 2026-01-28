@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" autoUpload="Always" serverName="shzheng2025@10.140.32.135:22 password" remoteFilesAllowedToDisappearOnAutoupload="false" autoUploadExternalChanges="true">
+    <serverData>
+      <paths name="JGRM">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/shzheng2025/bias/JGRM-Enc" local="$PROJECT_DIR$" web="/" />
+            <mapping local="" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="shzheng2025@10.140.32.135:22 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/home/shzheng2025/bias/JGRM-Enc" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+    <option name="myAutoUpload" value="ALWAYS" />
+  </component>
+</project>

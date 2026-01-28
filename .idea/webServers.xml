@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="9682fe9b-d012-4e74-82d4-5706656d841b" name="JGRM">
+        <fileTransfer accessType="SFTP" host="10.140.32.135" port="22" sshConfigId="302315eb-5a88-46f3-9e5b-7bd21d97965a" sshConfig="shzheng2025@10.140.32.135:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
