@@ -7,8 +7,8 @@ import time
 import pickle
 from utils import Logger
 import argparse
-from task import road_cls, speed_inf, time_est, sim_srh
-from evluation_utils import get_road, fair_sampling, get_seq_emb_from_traj_withRouteOnly, get_seq_emb_from_traj_withALLModel, prepare_data
+from task import road_cls, speed_inf, time_est, seg_time, congestion_inf
+from evluation_utils import get_road, fair_sampling, get_seq_emb_from_traj_withRouteOnly, get_seq_emb_from_traj_withALLModel, prepare_data, get_route_rep_from_traj_withRouteOnly
 import torch
 import os
 torch.set_num_threads(5)
@@ -70,6 +70,25 @@ def evaluation(city, exp_path, model_name, start_time):
     
     # task 3
     time_est.evaluation(seq_embedding, test_seq_data, num_nodes)
+    del seq_embedding
+    torch.cuda.empty_cache()
+
+    # segment-level time decomposition + congestion inference
+    print("start segment-level time decomposition")
+    seg_start = time.time()
+    route_batch_size = 256
+    route_road_rep = get_route_rep_from_traj_withRouteOnly(seq_model, test_data, batch_size=route_batch_size)
+    seg_result = seg_time.evaluation(
+        route_road_rep,
+        dataset,
+        num_nodes,
+        batch_size=64,
+        eval_batch_size=256,
+        log_interval=5,
+        use_amp=False
+    )
+    congestion_inf.evaluation(seg_result['segment_time_pred'], dataset, feature_df, split_df=seg_result['split_df'])
+    print("end segment-level time decomposition, cost {:.2f}s".format(time.time() - seg_start))
 
     route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length, dataset = prepare_data(
         test_seq_data, route_min_len, route_max_len, gps_min_len, gps_max_len)
@@ -85,13 +104,12 @@ def evaluation(city, exp_path, model_name, start_time):
     # sim_srh.evaluation2(seq_embedding, None, seq_model, test_seq_data, num_nodes, detour_base, feature_df,
     #                     detour_rate=0.15, fold=10)  # 当road_embedding为None的时候过模型处理，时间特征为空
 
-    geometry_df = pd.read_csv("/home/shzheng2025/data/{}/edge_geometry.csv".format(city))
-
-    trans_mat = np.load('/home/shzheng2025/data/{}/transition_prob_mat.npy'.format(city))
-    trans_mat = torch.tensor(trans_mat)
-    
-    sim_srh.evaluation3(seq_embedding, None, seq_model, test_seq_data, num_nodes, trans_mat, feature_df, geometry_df,
-                        detour_rate=0.3, fold=10)  # 当road_embedding为None的时候过模型处理，时间特征为空
+    # sim_srh is disabled for now because it can crash due to route feature shape mismatch.
+    # geometry_df = pd.read_csv("/home/shzheng2025/data/{}/edge_geometry.csv".format(city))
+    # trans_mat = np.load('/home/shzheng2025/data/{}/transition_prob_mat.npy'.format(city))
+    # trans_mat = torch.tensor(trans_mat)
+    # sim_srh.evaluation3(seq_embedding, None, seq_model, test_seq_data, num_nodes, trans_mat, feature_df, geometry_df,
+    #                    detour_rate=0.3, fold=10)  # 当road_embedding为None的时候过模型处理，时间特征为空
 
     end_time = time.time()
     print("cost time : {:.2f} s".format(end_time - start_time))
@@ -227,6 +245,4 @@ if __name__ == '__main__':
 # xian 对比 三角损失 + 0.1*轨迹级对比 CL的加入会有一些负面作用
 # travel time estimation  | MAE: 89.2120, RMSE: 121.4869
 # similarity search       | Mean Rank: 13.1270, HR@10: 0.8667, No Hit: 19.8
-
-
 

@@ -352,6 +352,29 @@ def get_seq_emb_from_traj_withRouteOnly(seq_model, test_data, batch_size=1024):
 
     return route_traj_rep
 
+
+def get_route_rep_from_traj_withRouteOnly(seq_model, test_data, batch_size=1024):
+    # 返回每个路段的表征, 形状 (num_samples, max_len, dim)
+    route_data, masked_route_assign_mat, _, _, route_assign_mat, _, _ = test_data
+
+    with torch.no_grad():
+        route_road_rep_list = []
+        for i in range(route_data.shape[0] // batch_size + 1):
+            start_idx = i * batch_size
+            end_idx = (i + 1) * batch_size
+            if end_idx > route_data.shape[0]:
+                end_idx = None
+            batch_route_data = route_data[start_idx:end_idx].cuda()
+            batch_masked_route_assign_mat = masked_route_assign_mat[start_idx:end_idx].cuda()
+            batch_route_assign_mat = route_assign_mat[start_idx:end_idx].cuda()
+            route_road_rep, _ = seq_model.encode_route(batch_route_data, batch_route_assign_mat, batch_masked_route_assign_mat)
+            del batch_route_data, batch_masked_route_assign_mat, batch_route_assign_mat
+            route_road_rep_list.append(route_road_rep.detach().cpu())
+            del route_road_rep
+
+    route_road_rep = torch.cat(route_road_rep_list, dim=0)
+    return route_road_rep
+
 # 从学到的节点的表示生成轨迹的表示
 def get_seq_emb_from_node(node_embedding, route_assgin_mat, route_length, batch_size):
     route_assgin_mat = route_assgin_mat.long().numpy()
