@@ -6,12 +6,22 @@ from basemodel import BaseModel
 import torch.nn.utils.rnn as rnn_utils
 import torch.nn.functional as F
 import math
+import torch.utils.checkpoint as checkpoint
+from vision_encoder import TimeVLMVisionEncoder
 
 
 class JGRMModel(BaseModel):
     def __init__(self, vocab_size, route_max_len, road_feat_num, road_embed_size, gps_feat_num, gps_embed_size,
                  route_embed_size, hidden_size, edge_index, drop_edge_rate, drop_route_rate, drop_road_rate,
-                 mode='p', add_temporal_bias=True, temporal_bias_dim=64):
+                 mode='p', add_temporal_bias=True, temporal_bias_dim=64, use_vision=False, vision_image_size=224,
+                 vision_periodicity=24, vision_hidden_dim=64, vision_output_channels=3,
+                 clip_model_name='ViT-B-32', clip_pretrained='openai', freeze_clip=False,
+                 vision_feature_idx=(1, 2, 3, 4, 5, 6, 7), use_vision_gate=False,
+                 freeze_ts_to_image=False, use_checkpoint=False, use_vision_in_joint=True,
+                 gps_intra_chunk_size=None, vision_fuse_after_gru=False, vision_fuse_after_joint=False,
+                 use_route_vision=False, route_vision_feature_idx=(0, 1, 2),
+                 route_vision_stats=None, route_vision_use_log1p=False,
+                 use_vision_pair_fuse=False, use_vision_pair_gate=True):
         super(JGRMModel, self).__init__()
 
         self.vocab_size = vocab_size  # 路段数量
@@ -20,6 +30,20 @@ class JGRMModel(BaseModel):
         self.drop_edge_rate = drop_edge_rate
         self.add_temporal_bias = add_temporal_bias
         self.temporal_bias_dim = temporal_bias_dim
+        self.use_vision = use_vision
+        self.vision_feature_idx = vision_feature_idx
+        self.use_vision_gate = use_vision_gate
+        self.use_checkpoint = use_checkpoint
+        self.use_vision_in_joint = use_vision_in_joint
+        self.gps_intra_chunk_size = gps_intra_chunk_size
+        self.vision_fuse_after_gru = vision_fuse_after_gru
+        self.vision_fuse_after_joint = vision_fuse_after_joint
+        self.use_route_vision = use_route_vision
+        self.route_vision_feature_idx = route_vision_feature_idx
+        self.route_vision_stats = route_vision_stats
+        self.route_vision_use_log1p = route_vision_use_log1p
+        self.use_vision_pair_fuse = use_vision_pair_fuse
+        self.use_vision_pair_gate = use_vision_pair_gate
 
         # node embedding
         self.route_padding_vec = torch.zeros(1, road_embed_size, requires_grad=True).cuda()#（1，128）的全0向量，用来填充[[0，0，0……0]]
@@ -50,7 +74,8 @@ class JGRMModel(BaseModel):
 
         # shared transformer
         self.position_embedding2 = nn.Embedding(route_max_len, hidden_size)
-        self.modal_embedding = nn.Embedding(2, hidden_size)
+        modal_count = 3 if (self.use_vision and self.use_vision_in_joint) else 2
+        self.modal_embedding = nn.Embedding(modal_count, hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.sharedtransformer = TransformerModel(hidden_size, 4, hidden_size, 2, drop_road_rate,
                                                   add_temporal_bias=False)
@@ -75,6 +100,63 @@ class JGRMModel(BaseModel):
             elif self.temporal_bias_dim == -1:
                 self.temporal_mat_bias = nn.Parameter(torch.Tensor(1, 1))
                 nn.init.xavier_uniform_(self.temporal_mat_bias)
+
+        # vision encoder (optional)
+        if self.use_vision:
+            self.vision_encoder = TimeVLMVisionEncoder(
+                input_dim=len(self.vision_feature_idx),
+                image_size=vision_image_size,
+                periodicity=vision_periodicity,
+                hidden_dim=vision_hidden_dim,
+                output_channels=vision_output_channels,
+                clip_model_name=clip_model_name,
+                clip_pretrained=clip_pretrained,
+                freeze_clip=freeze_clip,
+                freeze_ts_to_image=freeze_ts_to_image,
+            )
+            self.vision_proj_head = nn.Linear(self.vision_encoder.output_dim, hidden_size)
+            if self.use_route_vision:
+                self.route_vision_encoder = TimeVLMVisionEncoder(
+                    input_dim=len(self.route_vision_feature_idx),
+                    image_size=vision_image_size,
+                    periodicity=vision_periodicity,
+                    hidden_dim=vision_hidden_dim,
+                    output_channels=vision_output_channels,
+                    clip_model_name=clip_model_name,
+                    clip_pretrained=clip_pretrained,
+                    freeze_clip=freeze_clip,
+                    freeze_ts_to_image=freeze_ts_to_image,
+                )
+                self.route_vision_proj_head = nn.Linear(self.route_vision_encoder.output_dim, hidden_size)
+                self.vision_fuse_route = nn.Linear(hidden_size * 2, hidden_size)
+            if self.use_vision_pair_fuse:
+                self.gps_vision_fuse = nn.Linear(hidden_size * 2, hidden_size)
+                self.route_vision_fuse = nn.Linear(hidden_size * 2, hidden_size)
+                if self.use_vision_pair_gate:
+                    self.gps_vision_gate = nn.Sequential(
+                        nn.Linear(hidden_size * 2, hidden_size),
+                        nn.ReLU(),
+                        nn.Linear(hidden_size, 1),
+                    )
+                    self.route_vision_gate = nn.Sequential(
+                        nn.Linear(hidden_size * 2, hidden_size),
+                        nn.ReLU(),
+                        nn.Linear(hidden_size, 1),
+                    )
+            if self.use_vision_gate:
+                self.gps_gate_proj = nn.Linear(2 * gps_embed_size, hidden_size)
+                self.vision_gate = nn.Sequential(
+                    nn.Linear(hidden_size * 3, hidden_size),
+                    nn.ReLU(),
+                    nn.Linear(hidden_size, 1),
+                )
+                self.vision_fuse = nn.Linear(hidden_size * 2, hidden_size)
+            if self.vision_fuse_after_gru:
+                self.vision_fuse_after_gru_route = nn.Linear(hidden_size * 2, hidden_size)
+                self.vision_fuse_after_gru_gps = nn.Linear(hidden_size * 2, hidden_size)
+            if self.vision_fuse_after_joint:
+                self.vision_fuse_after_joint_route = nn.Linear(hidden_size * 2, hidden_size)
+                self.vision_fuse_after_joint_gps = nn.Linear(hidden_size * 2, hidden_size)
 
     def compute_temporal_bias(self, temporal_mat):
         temporal_mat = 1.0 / torch.log(torch.exp(torch.tensor(1.0).cuda()) + temporal_mat)
@@ -112,7 +194,7 @@ class JGRMModel(BaseModel):
         #Compute temporal bias matrix
         # Compute temporal bias matrix using actual timestamps
         temporal_mat = None
-        if self.add_temporal_bias and route_data is not None:
+        if getattr(self, 'add_temporal_bias', False) and route_data is not None:
             # 第4个维度存储的是实际时间戳
             time_stamps = route_data[:, :, 3].float()  # (B, T) 实际时间戳
 
@@ -167,9 +249,15 @@ class JGRMModel(BaseModel):
         masked_gps_data = gps_data * gps_mask_mat # (batch_size,gps_max_len,feat_num)
 
         # flatten gps data 便于进行路段内gru的并行
-        flattened_gps_data, route_length = self.gps_flatten(masked_gps_data, gps_length) # flattened_gps_data (road_num, max_pt_len ,gps_fea_size)
-        _, gps_emb = self.gps_intra_encoder(flattened_gps_data) # gps_emb (1, road_num, gps_embed_size) # 不输入hidden默认输入全0为序列的hidden state
-        gps_emb = gps_emb[-1] # 只保留前向的表示
+        flattened_gps_list, route_length = self.gps_flatten(masked_gps_data, gps_length)
+        gps_emb_chunks = []
+        chunk_size = self.gps_intra_chunk_size or len(flattened_gps_list)
+        for start in range(0, len(flattened_gps_list), chunk_size):
+            chunk_list = flattened_gps_list[start:start + chunk_size]
+            chunk_data = rnn_utils.pad_sequence(chunk_list, padding_value=0, batch_first=True)
+            _, chunk_emb = self.gps_intra_encoder(chunk_data)
+            gps_emb_chunks.append(chunk_emb[-1])
+        gps_emb = torch.cat(gps_emb_chunks, dim=0)
         # gps_emb = torch.cat([gps_emb[0].squeeze(0), gps_emb[1].squeeze(0)],dim=-1) # 前后向表示拼接
 
         # stack gps emb 便于进行路段间gru的计算
@@ -205,26 +293,22 @@ class JGRMModel(BaseModel):
         # 该tensor用于输入GRU进行并行计算
         traj_num, gps_max_len, gps_feat_num = gps_data.shape
         flattened_gps_list = []
-        route_index = {}  #键是第几条轨迹，值是该轨迹中有多少路段
+        route_index = {}
         for idx in range(traj_num):
-            gps_feat = gps_data[idx] # (max_len, feat_num)   取出当前这条轨迹中所有的gps点
-            length_list = gps_length[idx] # (max_len, 1) [7,9,12,1,0,0,0,0,0,0] # padding_value = 0
-            # 遍历每个轨迹中的路段
+            gps_feat = gps_data[idx]
+            length_list = gps_length[idx]
             for _idx, length in enumerate(length_list):
-                if length != 0:   #跳过无效的填充路段（0）
+                if length != 0:
                     start_idx = sum(length_list[:_idx])
                     end_idx = start_idx + length_list[_idx]
                     cnt = route_index.get(idx, 0)
-                    route_index[idx] = cnt+1
-                    road_feat = gps_feat[start_idx:end_idx]  #当前路段的GPS数据块（road_feat）,从当前轨迹的GPS数据中，切片提取属于当前路段的GPS点
+                    route_index[idx] = cnt + 1
+                    road_feat = gps_feat[start_idx:end_idx]
                     flattened_gps_list.append(road_feat)
 
-        flattened_gps_data = rnn_utils.pad_sequence(flattened_gps_list, padding_value=0, batch_first=True) # (road_num, gps_max_len, gps_feat_num)
-        #flattened_gps_data形状三维(所有路段总数, max_pts_per_road, gps_feat_num)
+        return flattened_gps_list, route_index
 
-        return flattened_gps_data, route_index
-
-    def encode_joint(self, route_road_rep, route_traj_rep, gps_road_rep, gps_traj_rep, route_assign_mat):
+    def encode_joint(self, route_road_rep, route_traj_rep, gps_road_rep, gps_traj_rep, route_assign_mat, vision_traj_rep=None):
         max_len = torch.max((route_assign_mat != self.vocab_size).int().sum(1)).item()
         max_len = max_len * 2 + 2
         data_list = []
@@ -233,6 +317,9 @@ class JGRMModel(BaseModel):
 
         modal_emb0 = self.modal_embedding(torch.tensor(0).cuda())
         modal_emb1 = self.modal_embedding(torch.tensor(1).cuda())
+        modal_emb2 = None
+        if self.use_vision_in_joint and vision_traj_rep is not None:
+            modal_emb2 = self.modal_embedding(torch.tensor(2).cuda())
 
         for i, length in enumerate(route_length):
             route_road_token = route_road_rep[i][:length]
@@ -254,6 +341,14 @@ class JGRMModel(BaseModel):
             gps_emb = self.fc2(gps_emb)
 
             data = torch.cat([gps_emb, route_emb], dim=0)
+
+            if self.use_vision_in_joint and vision_traj_rep is not None:
+                vision_cls_token = vision_traj_rep[i].unsqueeze(0)
+                vision_pos_emb = self.position_embedding2(torch.tensor([0]).cuda())
+                vision_emb = vision_cls_token + vision_pos_emb + modal_emb2.unsqueeze(0)
+                vision_emb = self.fc2(vision_emb)
+                data = torch.cat([data, vision_emb], dim=0)
+
             data_list.append(data)
 
             mask = torch.tensor([False] * data.shape[0]).cuda()
@@ -263,7 +358,13 @@ class JGRMModel(BaseModel):
         mask_mat = rnn_utils.pad_sequence(mask_list, padding_value=True, batch_first=True)
 
         # Pass temporal_mat to transformer
-        joint_emb = self.sharedtransformer(joint_data, None, mask_mat)
+        if self.use_checkpoint and self.training:
+            def _shared_forward(x, mask):
+                return self.sharedtransformer(x, None, mask)
+
+            joint_emb = checkpoint.checkpoint(_shared_forward, joint_data, mask_mat)
+        else:
+            joint_emb = self.sharedtransformer(joint_data, None, mask_mat)
 
         # 每一行的0 和 length+1 对应的是 gps_traj_rep 和 route_traj_rep
         gps_traj_rep = joint_emb[:, 0]
@@ -277,12 +378,111 @@ class JGRMModel(BaseModel):
 
         return gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep
 
+    def encode_vision(self, gps_data, gps_assign_mat=None):
+        if not self.use_vision:
+            return None
+        feature_idx = list(self.vision_feature_idx)
+        x_enc = gps_data[:, :, feature_idx]
+        if gps_assign_mat is not None:
+            padding_mask = (gps_assign_mat == self.vocab_size).unsqueeze(-1)
+            x_enc = x_enc.masked_fill(padding_mask, 0.0)
+        vision_traj_rep = self.vision_encoder(x_enc)
+        vision_traj_rep = self.vision_proj_head(vision_traj_rep)
+        return vision_traj_rep
+
+    def encode_route_vision(self, route_data, route_assign_mat=None):
+        if not self.use_vision or not self.use_route_vision:
+            return None
+        if route_data is None:
+            return None
+        feature_idx = list(self.route_vision_feature_idx)
+        x_enc = route_data[:, :, feature_idx].float()
+        if self.route_vision_use_log1p and 2 in feature_idx:
+            interval_pos = feature_idx.index(2)
+            x_enc[..., interval_pos] = torch.log1p(torch.clamp(x_enc[..., interval_pos], min=0.0))
+        if self.route_vision_stats is not None:
+            mean = torch.tensor(self.route_vision_stats['mean'], device=x_enc.device, dtype=x_enc.dtype)
+            std = torch.tensor(self.route_vision_stats['std'], device=x_enc.device, dtype=x_enc.dtype)
+            x_enc = (x_enc - mean) / std
+        else:
+            # Normalize known time-related features (weekday/minute/interval) when stats are unavailable.
+            if 0 in feature_idx:
+                x_enc[..., feature_idx.index(0)] = x_enc[..., feature_idx.index(0)] / 7.0
+            if 1 in feature_idx:
+                x_enc[..., feature_idx.index(1)] = x_enc[..., feature_idx.index(1)] / 1440.0
+            if 2 in feature_idx:
+                x_enc[..., feature_idx.index(2)] = x_enc[..., feature_idx.index(2)] / 100.0
+        if route_assign_mat is not None:
+            padding_mask = (route_assign_mat == self.vocab_size).unsqueeze(-1)
+            x_enc = x_enc.masked_fill(padding_mask, 0.0)
+        route_vision_traj_rep = self.route_vision_encoder(x_enc)
+        route_vision_traj_rep = self.route_vision_proj_head(route_vision_traj_rep)
+        return route_vision_traj_rep
+
+    def compute_vision_rep(self, gps_data, route_data, gps_assign_mat=None, route_assign_mat=None):
+        if not self.use_vision:
+            return None
+        vision_traj_rep = self.encode_vision(gps_data, gps_assign_mat=gps_assign_mat)
+        if vision_traj_rep is None:
+            return None
+        route_vision_traj_rep = self.encode_route_vision(route_data, route_assign_mat=route_assign_mat)
+        if route_vision_traj_rep is not None:
+            vision_traj_rep = self.vision_fuse_route(torch.cat([vision_traj_rep, route_vision_traj_rep], dim=1))
+        return vision_traj_rep
+
+    def fuse_pair(self, base_rep, vision_rep, fuse_layer, gate_layer=None):
+        if vision_rep is None:
+            return base_rep
+        fused_input = torch.cat([base_rep, vision_rep], dim=1)
+        if gate_layer is None:
+            return fuse_layer(fused_input)
+        gate = torch.sigmoid(gate_layer(fused_input))
+        gated_vision = vision_rep * gate
+        return fuse_layer(torch.cat([base_rep, gated_vision], dim=1))
+
     def forward(self, route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat,
                 gps_length):
         gps_road_rep, gps_traj_rep = self.encode_gps(gps_data, masked_gps_assign_mat, masked_route_assign_mat, gps_length)
         route_road_rep, route_traj_rep = self.encode_route(route_data, route_assign_mat, masked_route_assign_mat)
+        vision_traj_rep = self.encode_vision(gps_data, gps_assign_mat=masked_gps_assign_mat)
+        route_vision_traj_rep = self.encode_route_vision(route_data, route_assign_mat=masked_route_assign_mat)
+        if vision_traj_rep is not None and route_vision_traj_rep is not None:
+            vision_traj_rep = self.vision_fuse_route(torch.cat([vision_traj_rep, route_vision_traj_rep], dim=1))
+        if self.use_vision_pair_fuse:
+            gps_traj_rep = self.fuse_pair(
+                gps_traj_rep,
+                vision_traj_rep,
+                self.gps_vision_fuse,
+                self.gps_vision_gate if self.use_vision_pair_gate else None,
+            )
+            if self.use_route_vision:
+                route_traj_rep = self.fuse_pair(
+                    route_traj_rep,
+                    route_vision_traj_rep,
+                    self.route_vision_fuse,
+                    self.route_vision_gate if self.use_vision_pair_gate else None,
+                )
+            vision_traj_rep = None
+        if vision_traj_rep is not None and self.use_vision_gate:
+            gps_gate_rep = self.gps_gate_proj(gps_traj_rep)
+            gate_in = torch.cat([gps_gate_rep, route_traj_rep, vision_traj_rep], dim=1)
+            gate = torch.sigmoid(self.vision_gate(gate_in))
+            fused_route_traj = torch.cat([route_traj_rep, vision_traj_rep * gate], dim=1)
+            route_traj_rep = self.vision_fuse(fused_route_traj)
+            vision_traj_rep = None
+        elif vision_traj_rep is not None and self.vision_fuse_after_gru and not self.use_vision_in_joint:
+            fused_route_traj = torch.cat([route_traj_rep, vision_traj_rep], dim=1)
+            fused_gps_traj = torch.cat([gps_traj_rep, vision_traj_rep], dim=1)
+            route_traj_rep = self.vision_fuse_after_gru_route(fused_route_traj)
+            gps_traj_rep = self.vision_fuse_after_gru_gps(fused_gps_traj)
+            vision_traj_rep = None
         gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep = self.encode_joint(
-            route_road_rep, route_traj_rep, gps_road_rep, gps_traj_rep, route_assign_mat)
+            route_road_rep, route_traj_rep, gps_road_rep, gps_traj_rep, route_assign_mat, vision_traj_rep=vision_traj_rep)
+        if vision_traj_rep is not None and self.vision_fuse_after_joint and not self.use_vision_in_joint:
+            fused_route_joint = torch.cat([route_traj_joint_rep, vision_traj_rep], dim=1)
+            fused_gps_joint = torch.cat([gps_traj_joint_rep, vision_traj_rep], dim=1)
+            route_traj_joint_rep = self.vision_fuse_after_joint_route(fused_route_joint)
+            gps_traj_joint_rep = self.vision_fuse_after_joint_gps(fused_gps_joint)
 
         return gps_road_rep, gps_traj_rep, route_road_rep, route_traj_rep, \
             gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep
@@ -316,14 +516,18 @@ class TransformerModel(nn.Module):
         self.add_temporal_bias = add_temporal_bias
 
     def forward(self, src, src_mask, src_key_padding_mask, temporal_mat=None):
-        if self.add_temporal_bias and temporal_mat is not None:
+        use_temporal_bias = getattr(self, 'add_temporal_bias', False) and temporal_mat is not None
+        if use_temporal_bias:
             output = src
             temporal_mat = temporal_mat.unsqueeze(1)  # (B, 1, T, T)
             for layer in self.transformer_encoder.layers:
                 output, _ = layer(output, src_mask, src_key_padding_mask, temporal_mat=temporal_mat)
-        else:
-            output = self.transformer_encoder2(src, src_mask, src_key_padding_mask)
-        return output
+            return output
+
+        if hasattr(self, 'transformer_encoder2'):
+            return self.transformer_encoder2(src, src_mask, src_key_padding_mask)
+
+        return self.transformer_encoder(src, src_mask, src_key_padding_mask)
 
 
 class TransformerEncoderLayer(nn.Module):

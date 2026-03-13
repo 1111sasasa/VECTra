@@ -56,6 +56,7 @@ def evaluation(city, exp_path, model_name, start_time):
     test_node_data = (route_data, masked_route_assign_mat, gps_data, masked_gps_assign_mat, route_assign_mat, gps_length, dataset)
 
     update_road = 'route'
+    infer_batch_size = 256
     emb_path = '/home/shzheng2025/data/{}/{}_1101_1115_road_embedding_{}_{}_{}.pkl'.format(
         city, city, embedding_name, num_samples, update_road)
 
@@ -64,7 +65,7 @@ def evaluation(city, exp_path, model_name, start_time):
         road_embedding = torch.load(emb_path, map_location='cuda:{}'.format(dev_id))['road_embedding']
     else:
         # infer road embedding
-        road_embedding = get_road_emb_from_traj(seq_model, test_node_data, without_gps=False, batch_size=256,
+        road_embedding = get_road_emb_from_traj(seq_model, test_node_data, without_gps=False, batch_size=infer_batch_size,
                                                 update_road=update_road, city=city)
         torch.save({'road_embedding': road_embedding}, emb_path)
 

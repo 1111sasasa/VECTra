@@ -9,8 +9,8 @@
   "adj_path": "/home/shzheng2025/data/chengdu/line_graph_edge_idx.npy",
   "retrain": 1,
   "save_path": "/home/shzheng2025/bias/exp/",
-  "batch_size":64,
-  "num_worker":0,
+  "batch_size": 64,
+  "num_worker": 0,
   "route_min_len": 10,
   "route_max_len": 100,
   "gps_min_len": 10,
@@ -32,5 +32,11 @@
   "drop_road_rate": 0.1,
   "verbose": 1,
   "version": "finetune",
-  "random_seed": 2023
+  "random_seed": 2023,
+  "freeze_clip": false,
+  "freeze_ts_to_image": false,
+  "use_checkpoint": false,
+  "use_vision_in_joint": true,
+  "vision_fuse_after_gru": false,
+  "vision_fuse_after_joint": false
 }

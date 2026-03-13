@@ -32,5 +32,11 @@
   "drop_road_rate": 0.1,
   "verbose": 1,
   "version": "finetune",
-  "random_seed": 2023
+  "random_seed": 2023,
+  "freeze_clip": false,
+  "freeze_ts_to_image": false,
+  "use_checkpoint": false,
+  "use_vision_in_joint": true,
+  "vision_fuse_after_gru": false,
+  "vision_fuse_after_joint": false
 }

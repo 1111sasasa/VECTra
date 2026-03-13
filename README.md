@@ -43,6 +43,28 @@ The folder contains a total of two datasets, Chengdu and Xi'an. Each folder cont
 |    |----line_graph_edge_idx.npy                   # Adjacency matrix
 ```
 
+## Vision Branch (Optional)
+
+This project can optionally add a TimeVLM-style vision branch that converts GPS dynamic features into images and encodes them with CLIP.
+
+**Config keys** (see `config/chengdu.json`):
+- `use_vision`: enable/disable vision branch.
+- `vision_feature_idx`: indices from `gps_data` used for image generation (default `[1..7]`).
+- `vision_image_size`, `vision_periodicity`, `vision_hidden_dim`, `vision_output_channels`
+- `clip_model_name`, `clip_pretrained`, `freeze_clip`
+- `use_vision_gate`: apply trajectory-level gating before fusion
+- `freeze_ts_to_image`: freeze the time-series image generator to reduce memory
+- `use_checkpoint`: enable activation checkpointing for the shared transformer
+- `use_vision_in_joint`: when false, fuse vision at trajectory level instead of adding tokens
+
+**Dependencies**:
+- `open_clip_torch`, `einops`
+
+**Smoke test**:
+```bash
+python vision_smoke_test.py
+```
+
 ## Cite
 If you have any questions related to the code or the paper, feel free to email mazhipeng1024@my.swjtu.edu.cn.
 ```
@@ -60,4 +82,3 @@ If you have any questions related to the code or the paper, feel free to email m
   numpages = {12},
   location = {, Singapore, Singapore, },
   series = {WWW '24} }
-```

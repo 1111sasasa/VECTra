@@ -52,6 +52,18 @@ def finetune(config):
 
     mask_length = config['mask_length']
     mask_prob = config['mask_prob']
+    use_checkpoint = config.get('use_checkpoint', False)
+    use_vision_in_joint = config.get('use_vision_in_joint', True)
+    gps_intra_chunk_size = config.get('gps_intra_chunk_size', None)
+    vision_fuse_after_gru = config.get('vision_fuse_after_gru', False)
+    vision_fuse_after_joint = config.get('vision_fuse_after_joint', False)
+    use_vision_align_loss = config.get('use_vision_align_loss', False)
+    vision_align_loss_weight = config.get('vision_align_loss_weight', 0.0)
+    vision_align_target = config.get('vision_align_target', 'both')
+    route_vision_stats_path = config.get('route_vision_stats_path')
+    route_vision_use_log1p = config.get('route_vision_use_log1p', False)
+    use_vision_pair_fuse = config.get('use_vision_pair_fuse', False)
+    use_vision_pair_gate = config.get('use_vision_pair_gate', True)
 
     # 设置随机种子
     setup_seed(seed)
@@ -71,6 +83,13 @@ def finetune(config):
     model.route_mlm_head = nn.Linear(hidden_size, vocab_size)
     model.gps_mlm_head.cuda()
     model.route_mlm_head.cuda()
+
+    if route_vision_stats_path and os.path.exists(route_vision_stats_path):
+        with open(route_vision_stats_path, 'r') as stats_file:
+            model.route_vision_stats = json.load(stats_file)
+    model.route_vision_use_log1p = route_vision_use_log1p
+    model.use_vision_pair_fuse = use_vision_pair_fuse
+    model.use_vision_pair_gate = use_vision_pair_gate
 
     model.train()
 
@@ -134,6 +153,21 @@ def finetune(config):
             gps_traj_rep = model.gps_proj_head(gps_traj_rep)
             route_traj_rep = model.route_proj_head(route_traj_rep)
 
+            # optional vision alignment loss
+            vision_align_loss = torch.tensor(0.0, device=gps_traj_rep.device)
+            if getattr(model, 'use_vision', False) and use_vision_align_loss and vision_align_loss_weight > 0:
+                vision_traj_rep = model.compute_vision_rep(
+                    gps_data, route_data, gps_assign_mat=masked_gps_assign_mat, route_assign_mat=masked_route_assign_mat
+                )
+                if vision_traj_rep is not None:
+                    vision_traj_rep = F.normalize(vision_traj_rep, dim=1)
+                    if vision_align_target in ('gps', 'both'):
+                        gps_norm = F.normalize(gps_traj_rep, dim=1)
+                        vision_align_loss = vision_align_loss + (1 - (vision_traj_rep * gps_norm).sum(dim=1)).mean()
+                    if vision_align_target in ('route', 'both'):
+                        route_norm = F.normalize(route_traj_rep, dim=1)
+                        vision_align_loss = vision_align_loss + (1 - (vision_traj_rep * route_norm).sum(dim=1)).mean()
+
             # (GRM) get gps & route rep matching loss
             tau = 0.07
             match_loss = get_traj_match_loss(gps_traj_rep, route_traj_rep, model, batch_size, tau)
@@ -159,11 +193,15 @@ def finetune(config):
             # loss = (route_mlm_loss + gps_mlm_loss + 0.2*traj_cl_loss + 0.1*road_cl_loss)/4
             # loss = (route_mlm_loss + gps_mlm_loss + 0.2*traj_cl_loss) / 3
             loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss) / 3
+            if use_vision_align_loss and vision_align_loss_weight > 0:
+                loss = loss + vision_align_loss_weight * vision_align_loss
 
             step = epoch_step*epoch + idx
             writer.add_scalar('match_loss/match_loss', match_loss, step)
             writer.add_scalar('mlm_loss/gps_mlm_loss', gps_mlm_loss, step)
             writer.add_scalar('mlm_loss/route_mlm_loss', route_mlm_loss, step)
+            if use_vision_align_loss and vision_align_loss_weight > 0:
+                writer.add_scalar('vision_align_loss', vision_align_loss, step)
             writer.add_scalar('loss', loss, step)
 
             optimizer.zero_grad()
