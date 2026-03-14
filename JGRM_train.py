@@ -94,6 +94,10 @@ def train(config):
     route_vision_use_log1p = config.get('route_vision_use_log1p', False)
     use_vision_pair_fuse = config.get('use_vision_pair_fuse', False)
     use_vision_pair_gate = config.get('use_vision_pair_gate', True)
+    fusion_type = config.get('fusion_type', 'shared')
+    use_modality_embedding = config.get('use_modality_embedding', True)
+    cross_modal_num_heads = config.get('cross_modal_num_heads', 4)
+    cross_modal_num_layers = config.get('cross_modal_num_layers', 1)
 
     verbose = config['verbose']
     version = config['version']
@@ -142,7 +146,9 @@ def train(config):
                       vision_fuse_after_gru=vision_fuse_after_gru, vision_fuse_after_joint=vision_fuse_after_joint,
                       use_route_vision=use_route_vision, route_vision_feature_idx=route_vision_feature_idx,
                       route_vision_stats=route_vision_stats, route_vision_use_log1p=route_vision_use_log1p,
-                      use_vision_pair_fuse=use_vision_pair_fuse, use_vision_pair_gate=use_vision_pair_gate).cuda()
+                      use_vision_pair_fuse=use_vision_pair_fuse, use_vision_pair_gate=use_vision_pair_gate,
+                      fusion_type=fusion_type, use_modality_embedding=use_modality_embedding,
+                      cross_modal_num_heads=cross_modal_num_heads, cross_modal_num_layers=cross_modal_num_layers).cuda()
     # Modify it to your own directory
     init_road_emb = torch.load('/home/shzheng2025/data/{}/init_w2v_road_emb.pt'.format(city), map_location='cuda:{}'.format(dev_id))
     model.node_embedding.weight = torch.nn.Parameter(init_road_emb['init_road_embd'])

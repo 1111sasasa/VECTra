@@ -38,5 +38,9 @@
   "use_checkpoint": false,
   "use_vision_in_joint": true,
   "vision_fuse_after_gru": false,
-  "vision_fuse_after_joint": false
+  "vision_fuse_after_joint": false,
+  "fusion_type": "cross_modal",
+  "use_modality_embedding": true,
+  "cross_modal_num_heads": 4,
+  "cross_modal_num_layers": 1
 }

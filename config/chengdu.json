@@ -52,5 +52,9 @@
   "use_route_vision": true,
   "route_vision_feature_idx": [0, 1, 2],
   "route_vision_stats_path": "config/route_vision_stats_chengdu.json",
-  "route_vision_use_log1p": true
+  "route_vision_use_log1p": true,
+  "fusion_type": "cross_modal",
+  "use_modality_embedding": true,
+  "cross_modal_num_heads": 4,
+  "cross_modal_num_layers": 1
 }

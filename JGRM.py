@@ -21,7 +21,9 @@ class JGRMModel(BaseModel):
                  gps_intra_chunk_size=None, vision_fuse_after_gru=False, vision_fuse_after_joint=False,
                  use_route_vision=False, route_vision_feature_idx=(0, 1, 2),
                  route_vision_stats=None, route_vision_use_log1p=False,
-                 use_vision_pair_fuse=False, use_vision_pair_gate=True):
+                 use_vision_pair_fuse=False, use_vision_pair_gate=True,
+                 fusion_type='shared', use_modality_embedding=True, cross_modal_num_heads=4,
+                 cross_modal_num_layers=1):
         super(JGRMModel, self).__init__()
 
         self.vocab_size = vocab_size  # 路段数量
@@ -44,6 +46,8 @@ class JGRMModel(BaseModel):
         self.route_vision_use_log1p = route_vision_use_log1p
         self.use_vision_pair_fuse = use_vision_pair_fuse
         self.use_vision_pair_gate = use_vision_pair_gate
+        self.fusion_type = fusion_type
+        self.use_modality_embedding = use_modality_embedding
 
         # node embedding
         self.route_padding_vec = torch.zeros(1, road_embed_size, requires_grad=True).cuda()#（1，128）的全0向量，用来填充[[0，0，0……0]]
@@ -79,6 +83,12 @@ class JGRMModel(BaseModel):
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.sharedtransformer = TransformerModel(hidden_size, 4, hidden_size, 2, drop_road_rate,
                                                   add_temporal_bias=False)
+        self.cross_modal_fusion = BiCrossModalFusion(
+            hidden_size=hidden_size,
+            num_heads=cross_modal_num_heads,
+            dropout=drop_road_rate,
+            num_layers=cross_modal_num_layers,
+        )
 
         # mlm classifier head
         self.gps_mlm_head = nn.Linear(hidden_size, vocab_size)
@@ -315,10 +325,11 @@ class JGRMModel(BaseModel):
         mask_list = []
         route_length = [length[length != self.vocab_size].shape[0] for length in route_assign_mat]
 
-        modal_emb0 = self.modal_embedding(torch.tensor(0).cuda())
-        modal_emb1 = self.modal_embedding(torch.tensor(1).cuda())
+        modal_emb0 = self.modal_embedding(torch.tensor(0).cuda()) if self.use_modality_embedding else 0.0
+        modal_emb1 = self.modal_embedding(torch.tensor(1).cuda()) if self.use_modality_embedding else 0.0
         modal_emb2 = None
-        if self.use_vision_in_joint and vision_traj_rep is not None:
+
+        if self.use_vision_in_joint and vision_traj_rep is not None and self.use_modality_embedding:
             modal_emb2 = self.modal_embedding(torch.tensor(2).cuda())
 
         for i, length in enumerate(route_length):
@@ -331,23 +342,54 @@ class JGRMModel(BaseModel):
             pos_emb = self.position_embedding2(position)
 
             route_emb = torch.cat([route_cls_token, route_road_token], dim=0)
-            modal_emb = modal_emb0.unsqueeze(0).repeat(length + 1, 1)
-            route_emb = route_emb + pos_emb + modal_emb
+            if self.use_modality_embedding:
+                modal_emb = modal_emb0.unsqueeze(0).repeat(length + 1, 1)
+                route_emb = route_emb + pos_emb + modal_emb
+            else:
+                route_emb = route_emb + pos_emb
             route_emb = self.fc2(route_emb)
 
             gps_emb = torch.cat([gps_cls_token, gps_road_token], dim=0)
-            modal_emb = modal_emb1.unsqueeze(0).repeat(length + 1, 1)
-            gps_emb = gps_emb + pos_emb + modal_emb
+            if self.use_modality_embedding:
+                modal_emb = modal_emb1.unsqueeze(0).repeat(length + 1, 1)
+                gps_emb = gps_emb + pos_emb + modal_emb
+            else:
+                gps_emb = gps_emb + pos_emb
             gps_emb = self.fc2(gps_emb)
 
-            data = torch.cat([gps_emb, route_emb], dim=0)
+            if self.fusion_type == 'cross_modal':
+                gps_mask = torch.tensor([False] * gps_emb.shape[0], device=gps_emb.device)
+                route_mask = torch.tensor([False] * route_emb.shape[0], device=route_emb.device)
+                gps_out, route_out = self.cross_modal_fusion(
+                    gps_emb.unsqueeze(0), route_emb.unsqueeze(0),
+                    gps_key_padding_mask=gps_mask.unsqueeze(0),
+                    route_key_padding_mask=route_mask.unsqueeze(0),
+                )
+                gps_out = gps_out.squeeze(0)
+                route_out = route_out.squeeze(0)
+                if self.use_vision_in_joint and vision_traj_rep is not None:
+                    vision_cls_token = vision_traj_rep[i].unsqueeze(0)
+                    vision_pos_emb = self.position_embedding2(torch.tensor([0]).cuda())
+                    if self.use_modality_embedding:
+                        vision_emb = vision_cls_token + vision_pos_emb + modal_emb2.unsqueeze(0)
+                    else:
+                        vision_emb = vision_cls_token + vision_pos_emb
+                    vision_emb = self.fc2(vision_emb)
+                    data = torch.cat([gps_out, route_out, vision_emb], dim=0)
+                else:
+                    data = torch.cat([gps_out, route_out], dim=0)
+            else:
+                data = torch.cat([gps_emb, route_emb], dim=0)
 
-            if self.use_vision_in_joint and vision_traj_rep is not None:
-                vision_cls_token = vision_traj_rep[i].unsqueeze(0)
-                vision_pos_emb = self.position_embedding2(torch.tensor([0]).cuda())
-                vision_emb = vision_cls_token + vision_pos_emb + modal_emb2.unsqueeze(0)
-                vision_emb = self.fc2(vision_emb)
-                data = torch.cat([data, vision_emb], dim=0)
+                if self.use_vision_in_joint and vision_traj_rep is not None:
+                    vision_cls_token = vision_traj_rep[i].unsqueeze(0)
+                    vision_pos_emb = self.position_embedding2(torch.tensor([0]).cuda())
+                    if self.use_modality_embedding:
+                        vision_emb = vision_cls_token + vision_pos_emb + modal_emb2.unsqueeze(0)
+                    else:
+                        vision_emb = vision_cls_token + vision_pos_emb
+                    vision_emb = self.fc2(vision_emb)
+                    data = torch.cat([data, vision_emb], dim=0)
 
             data_list.append(data)
 
@@ -358,13 +400,16 @@ class JGRMModel(BaseModel):
         mask_mat = rnn_utils.pad_sequence(mask_list, padding_value=True, batch_first=True)
 
         # Pass temporal_mat to transformer
-        if self.use_checkpoint and self.training:
-            def _shared_forward(x, mask):
-                return self.sharedtransformer(x, None, mask)
-
-            joint_emb = checkpoint.checkpoint(_shared_forward, joint_data, mask_mat)
+        if self.fusion_type == 'cross_modal':
+            joint_emb = joint_data
         else:
-            joint_emb = self.sharedtransformer(joint_data, None, mask_mat)
+            if self.use_checkpoint and self.training:
+                def _shared_forward(x, mask):
+                    return self.sharedtransformer(x, None, mask)
+
+                joint_emb = checkpoint.checkpoint(_shared_forward, joint_data, mask_mat)
+            else:
+                joint_emb = self.sharedtransformer(joint_data, None, mask_mat)
 
         # 每一行的0 和 length+1 对应的是 gps_traj_rep 和 route_traj_rep
         gps_traj_rep = joint_emb[:, 0]
@@ -648,3 +693,72 @@ class IntervalEmbedding(nn.Module):
         logit = self.activation(self.layer1(x.unsqueeze(-1)))
         output = logit @ self.emb.weight
         return output
+
+
+class BiCrossModalFusion(nn.Module):
+    def __init__(self, hidden_size, num_heads=4, dropout=0.1, num_layers=1):
+        super(BiCrossModalFusion, self).__init__()
+        self.layers = nn.ModuleList([
+            BiCrossModalLayer(hidden_size, num_heads=num_heads, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, gps_tokens, route_tokens, gps_key_padding_mask=None, route_key_padding_mask=None):
+        out_gps, out_route = gps_tokens, route_tokens
+        for layer in self.layers:
+            out_gps, out_route = layer(
+                out_gps,
+                out_route,
+                gps_key_padding_mask=gps_key_padding_mask,
+                route_key_padding_mask=route_key_padding_mask,
+            )
+        return out_gps, out_route
+
+
+class BiCrossModalLayer(nn.Module):
+    def __init__(self, hidden_size, num_heads=4, dropout=0.1):
+        super(BiCrossModalLayer, self).__init__()
+        self.gps_to_route = nn.MultiheadAttention(hidden_size, num_heads, dropout=dropout, batch_first=True)
+        self.route_to_gps = nn.MultiheadAttention(hidden_size, num_heads, dropout=dropout, batch_first=True)
+
+        self.gps_norm1 = nn.LayerNorm(hidden_size)
+        self.route_norm1 = nn.LayerNorm(hidden_size)
+        self.gps_norm2 = nn.LayerNorm(hidden_size)
+        self.route_norm2 = nn.LayerNorm(hidden_size)
+
+        self.gps_ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size * 4, hidden_size),
+        )
+        self.route_ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size * 4, hidden_size),
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, gps_tokens, route_tokens, gps_key_padding_mask=None, route_key_padding_mask=None):
+        gps_ctx, _ = self.gps_to_route(
+            query=gps_tokens,
+            key=route_tokens,
+            value=route_tokens,
+            key_padding_mask=route_key_padding_mask,
+            need_weights=False,
+        )
+        route_ctx, _ = self.route_to_gps(
+            query=route_tokens,
+            key=gps_tokens,
+            value=gps_tokens,
+            key_padding_mask=gps_key_padding_mask,
+            need_weights=False,
+        )
+
+        gps_tokens = self.gps_norm1(gps_tokens + self.dropout(gps_ctx))
+        route_tokens = self.route_norm1(route_tokens + self.dropout(route_ctx))
+
+        gps_tokens = self.gps_norm2(gps_tokens + self.dropout(self.gps_ffn(gps_tokens)))
+        route_tokens = self.route_norm2(route_tokens + self.dropout(self.route_ffn(route_tokens)))
+        return gps_tokens, route_tokens
