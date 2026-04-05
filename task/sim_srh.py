@@ -359,11 +359,8 @@ def query_prepare5(expid, cleaned_task_data, padding_id, num_queries, trans_mat,
         while stack:
             (vertex, path) = stack.pop()
 
-            if vertex == end and path != detour_path:  # 如果到达终点，则将路径添加到结果列表中
+            if vertex == end and path != detour_path:
                 paths.append(path)
-                # after_detour_length = np.sum([road_length_dict[road] for road in path])
-                # before_detour_length = np.sum([road_length_dict[road] for road in detour_path])
-                # path_length = np.sum([road_length_dict[road] for road in origin_path])
 
                 poly = detour_path[::-1][:-1] + path
                 pt_list = []
@@ -375,25 +372,19 @@ def query_prepare5(expid, cleaned_task_data, padding_id, num_queries, trans_mat,
                 if area > 1e-6:
                     global count
                     count += 1
-                    #  print(origin_path)
-                    #  print(detour_path)
-                    #  print(path)
-                    #  print(path_length, after_detour_length, before_detour_length , origin_path_length)
                     return path
 
-            if len(path) - 1 == int(1 / 3 * len(origin_path)) + 1:  # 如果长度到达最大长度但不符合标准则去除
+            if len(path) - 1 == int(1 / 3 * len(origin_path)) + 1:
                 continue
 
             for neighbor in torch.nonzero(trans_mat[vertex] != 0).reshape(-1, ).numpy().tolist():
-                if neighbor not in path:  # 如果邻居节点尚未访问过，则将其添加到路径中，并将其压入栈中
+                if neighbor not in path:
                     stack.append((neighbor, path + [neighbor]))
         if len(paths) == 0:
             return None
         return paths[-1]
 
     def detour(replace_rate, path, tm_list, detour_path, start_pos):
-        # 需要重建detour_base
-        # 开始和结束的位置不变
         start_time = tm_list[0]
         detour_anchor = dfs_path(detour_path[0], detour_path[-1], detour_path, path)
         if detour_anchor is None:
@@ -401,45 +392,45 @@ def query_prepare5(expid, cleaned_task_data, padding_id, num_queries, trans_mat,
         end_pos = start_pos + len(detour_path)
         pre_path = path[:start_pos]
         next_path = path[end_pos:]
-        p = np.random.random_sample()  # 产生[0,1)之间的随机数
+        p = np.random.random_sample()
         if p > replace_rate:
             new_path = pre_path + detour_anchor + next_path
         else:
             new_path = pre_path + [padding_id] * len(detour_path) + next_path
 
-        # 产生tm_list
         cur_travel_time_dict = {}
         for i in range(len(path) - 1):
             cur_travel_time_dict[path[i]] = tm_list[i + 1] - tm_list[i]
 
-        tm_list = [start_time]
+        new_tm_list = [start_time]
         for road in new_path:
             shift_ratio = np.random.uniform(-0.1, 0.1)
             if road in cur_travel_time_dict.keys():
-                tm_list.append(tm_list[-1] + cur_travel_time_dict[road] * (1 + shift_ratio))
+                new_tm_list.append(new_tm_list[-1] + cur_travel_time_dict[road] * (1 + shift_ratio))
             else:
-                tm_list.append(tm_list[-1] + history_travel_time_dict[road] * (1 + shift_ratio))
-        return new_path, tm_list
+                new_tm_list.append(new_tm_list[-1] + history_travel_time_dict[road] * (1 + shift_ratio))
+        return new_path, new_tm_list
 
     random_index = np.random.permutation(num_samples)
     q_arr = np.full([num_queries, max_len], padding_id, dtype=np.int32)
     week_arr = np.full([num_queries, max_len], 0, dtype=np.int32)
     minute_arr = np.full([num_queries, max_len], 0, dtype=np.int32)
+    delta_arr = np.full([num_queries, max_len], 0, dtype=np.int32)
+    timestamp_arr = np.full([num_queries, max_len], 0, dtype=np.int64)
 
     query_route_length = []
     for i in tqdm(range(num_queries)):
         row = cleaned_task_data.iloc[random_index[i]]
         sample_len = int(row['route_length'] * detour_rate) + 1
         path = row['cpath_list']
+        tm_list = row['road_timestamp']
         try_count = 0
         sample_pos_list = list(range(1, row['route_length'] - sample_len, 1))
         while path == row['cpath_list'] and try_count < 10 and len(sample_pos_list) != 0:
             try_count += 1
-            start_pos = np.random.choice(sample_pos_list, 1)[0]  # OD不参与处理
+            start_pos = np.random.choice(sample_pos_list, 1)[0]
             sample_pos_list.remove(start_pos)
             detour_path = row['cpath_list'][start_pos:start_pos + sample_len]
-            # detour_travel_time = row['road_timestamp'][start_pos+sample_len-1] - row['road_timestamp'][start_pos]
-            origin_path_length = row['total_length']
             path, tm_list = detour(0, row['cpath_list'], row['road_timestamp'], detour_path, start_pos)
 
         week_list = []
@@ -455,12 +446,17 @@ def query_prepare5(expid, cleaned_task_data, padding_id, num_queries, trans_mat,
         q_arr[i, :len(path)] = np.array(path, dtype=np.int32)
         week_arr[i, :len(path)] = np.array(week_list, dtype=np.int32)
         minute_arr[i, :len(path)] = np.array(minute_list, dtype=np.int32)
+        timestamp_arr[i, :len(path)] = np.array(tm_list[:-1], dtype=np.int64)
 
-        y = random_index[:num_queries]
-        tm_arr = torch.cat([torch.LongTensor(week_arr).unsqueeze(dim=2), torch.LongTensor(minute_arr).unsqueeze(dim=2),
-                        torch.zeros_like(torch.LongTensor(minute_arr).unsqueeze(dim=2)).long()], dim=-1)
+    y = random_index[:num_queries]
+    tm_arr = torch.cat([
+        torch.LongTensor(week_arr).unsqueeze(dim=2),
+        torch.LongTensor(minute_arr).unsqueeze(dim=2),
+        torch.LongTensor(delta_arr).unsqueeze(dim=2),
+        torch.LongTensor(timestamp_arr).unsqueeze(dim=2),
+    ], dim=-1)
 
-        return torch.LongTensor(q_arr), y, np.array(query_route_length), tm_arr
+    return torch.LongTensor(q_arr), y, np.array(query_route_length), tm_arr
 
 def evaluation(seq_embedding, road_embedding, seq_model, task_data, num_nodes, detour_base, detour_rate, fold=5):
     print('device: cpu')

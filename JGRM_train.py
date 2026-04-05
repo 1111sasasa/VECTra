@@ -77,7 +77,7 @@ def train(config):
     clip_model_name = config.get('clip_model_name', 'ViT-B-32')
     clip_pretrained = config.get('clip_pretrained', 'openai')
     freeze_clip = config.get('freeze_clip', False)
-    vision_feature_idx = config.get('vision_feature_idx', [1, 2, 3, 4, 5, 6, 7])
+    vision_feature_idx = config.get('vision_feature_idx', [1, 2, 6]) # 删除： a（噪声最大） Δd（完全冗余）
     use_vision_gate = config.get('use_vision_gate', False)
     freeze_ts_to_image = config.get('freeze_ts_to_image', False)
     use_checkpoint = config.get('use_checkpoint', False)
@@ -88,6 +88,10 @@ def train(config):
     use_vision_align_loss = config.get('use_vision_align_loss', False)
     vision_align_loss_weight = config.get('vision_align_loss_weight', 0.0)
     vision_align_target = config.get('vision_align_target', 'both')
+    use_traj_image_cl_loss = config.get('use_traj_image_cl_loss', False)
+    traj_image_cl_loss_weight = config.get('traj_image_cl_loss_weight', 0.0)
+    traj_image_cl_temperature = config.get('traj_image_cl_temperature', 0.07)
+    traj_image_cl_target = config.get('traj_image_cl_target', 'joint_both')
     use_route_vision = config.get('use_route_vision', False)
     route_vision_feature_idx = config.get('route_vision_feature_idx', [0, 1, 2])
     route_vision_stats_path = config.get('route_vision_stats_path')
@@ -98,6 +102,9 @@ def train(config):
     use_modality_embedding = config.get('use_modality_embedding', True)
     cross_modal_num_heads = config.get('cross_modal_num_heads', 4)
     cross_modal_num_layers = config.get('cross_modal_num_layers', 1)
+
+    use_vision_segment_encoder = config.get('use_vision_segment_encoder', False)
+    vision_segment_window_size = config.get('vision_segment_window_size', 1)
 
     verbose = config['verbose']
     version = config['version']
@@ -148,7 +155,9 @@ def train(config):
                       route_vision_stats=route_vision_stats, route_vision_use_log1p=route_vision_use_log1p,
                       use_vision_pair_fuse=use_vision_pair_fuse, use_vision_pair_gate=use_vision_pair_gate,
                       fusion_type=fusion_type, use_modality_embedding=use_modality_embedding,
-                      cross_modal_num_heads=cross_modal_num_heads, cross_modal_num_layers=cross_modal_num_layers).cuda()
+                      cross_modal_num_heads=cross_modal_num_heads, cross_modal_num_layers=cross_modal_num_layers,
+                      use_vision_segment_encoder=use_vision_segment_encoder,
+                      vision_segment_window_size=vision_segment_window_size).cuda()
     # Modify it to your own directory
     init_road_emb = torch.load('/home/shzheng2025/data/{}/init_w2v_road_emb.pt'.format(city), map_location='cuda:{}'.format(dev_id))
     model.node_embedding.weight = torch.nn.Parameter(init_road_emb['init_road_embd'])
@@ -222,6 +231,8 @@ def train(config):
             # project rep into the same space
             gps_traj_rep = model.gps_proj_head(gps_traj_rep)
             route_traj_rep = model.route_proj_head(route_traj_rep)
+            gps_traj_joint_proj = model.gps_proj_head(gps_traj_joint_rep)
+            route_traj_joint_proj = model.route_proj_head(route_traj_joint_rep)
 
             # optional vision alignment loss
             vision_align_loss = torch.tensor(0.0, device=gps_traj_rep.device)
@@ -237,6 +248,32 @@ def train(config):
                     if vision_align_target in ('route', 'both'):
                         route_norm = F.normalize(route_traj_rep, dim=1)
                         vision_align_loss = vision_align_loss + (1 - (vision_traj_rep * route_norm).sum(dim=1)).mean()
+
+            traj_image_cl_loss = torch.tensor(0.0, device=gps_traj_rep.device)
+            if use_vision and use_traj_image_cl_loss and traj_image_cl_loss_weight > 0:
+                image_traj_rep = model.compute_vision_rep(
+                    gps_data, route_data, gps_assign_mat=masked_gps_assign_mat, route_assign_mat=masked_route_assign_mat
+                )
+                if image_traj_rep is not None:
+                    image_traj_rep = F.normalize(image_traj_rep, dim=1)
+
+                    def _clip_pair_loss(anchor, positive, temperature):
+                        logits = torch.matmul(anchor, positive.t()) / temperature
+                        labels = torch.arange(anchor.size(0), device=anchor.device)
+                        loss_a = F.cross_entropy(logits, labels)
+                        loss_b = F.cross_entropy(logits.t(), labels)
+                        return 0.5 * (loss_a + loss_b)
+
+                    if traj_image_cl_target in ('gps_joint', 'joint_both'):
+                        gps_joint_norm = F.normalize(gps_traj_joint_proj, dim=1)
+                        traj_image_cl_loss = traj_image_cl_loss + _clip_pair_loss(
+                            gps_joint_norm, image_traj_rep, traj_image_cl_temperature
+                        )
+                    if traj_image_cl_target in ('route_joint', 'joint_both'):
+                        route_joint_norm = F.normalize(route_traj_joint_proj, dim=1)
+                        traj_image_cl_loss = traj_image_cl_loss + _clip_pair_loss(
+                            route_joint_norm, image_traj_rep, traj_image_cl_temperature
+                        )
 
             # (GRM LOSS) get gps & route rep matching loss
             tau = 0.07
@@ -266,6 +303,8 @@ def train(config):
             loss = (route_mlm_loss + gps_mlm_loss + 2*match_loss) / 3
             if use_vision_align_loss and vision_align_loss_weight > 0:
                 loss = loss + vision_align_loss_weight * vision_align_loss
+            if use_vision and use_traj_image_cl_loss and traj_image_cl_loss_weight > 0:
+                loss = loss + traj_image_cl_loss_weight * traj_image_cl_loss
 
             step = epoch_step*epoch + idx
             writer.add_scalar('match_loss/match_loss', match_loss, step)
@@ -273,15 +312,40 @@ def train(config):
             writer.add_scalar('mlm_loss/route_mlm_loss', route_mlm_loss, step)
             if use_vision_align_loss and vision_align_loss_weight > 0:
                 writer.add_scalar('vision_align_loss', vision_align_loss, step)
+            if use_vision and use_traj_image_cl_loss and traj_image_cl_loss_weight > 0:
+                writer.add_scalar('traj_image_cl_loss', traj_image_cl_loss, step)
             writer.add_scalar('loss', loss, step)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
+            debug_snapshot = model.get_debug_snapshot() if hasattr(model, 'get_debug_snapshot') else {}
+            if debug_snapshot:
+                writer.add_scalar('debug/image_branch_active', debug_snapshot.get('image_branch_active', 0.0), step)
+                writer.add_scalar('debug/image_context_norm', debug_snapshot.get('image_context_norm', 0.0), step)
+                writer.add_scalar('debug/stage2_seg_delta', debug_snapshot.get('stage2_seg_delta', 0.0), step)
+                writer.add_scalar('debug/stage3_gps_traj_delta', debug_snapshot.get('stage3_gps_traj_delta', 0.0), step)
+                writer.add_scalar('debug/stage3_route_traj_delta', debug_snapshot.get('stage3_route_traj_delta', 0.0), step)
+                writer.add_scalar('debug/vision_proj_grad_norm', debug_snapshot.get('vision_proj_grad_norm', 0.0), step)
+                writer.add_scalar('debug/ts_to_image_grad_norm', debug_snapshot.get('ts_to_image_grad_norm', 0.0), step)
+
             if not (idx + 1) % verbose:
                 t = datetime.now().strftime('%m-%d %H:%M:%S')
-                print(f'{t} | (Train) | Epoch={epoch}\tbatch_id={idx + 1}\tloss={loss.item():.4f}')
+                if debug_snapshot:
+                    print(
+                        f"{t} | (Train) | Epoch={epoch}\tbatch_id={idx + 1}\tloss={loss.item():.4f}"
+                        f"\timg_active={debug_snapshot.get('image_branch_active', 0.0):.0f}"
+                        f"\timg_norm={debug_snapshot.get('image_context_norm', 0.0):.4f}"
+                        f"\tstage2_delta={debug_snapshot.get('stage2_seg_delta', 0.0):.6f}"
+                        f"\tstage3_gps_delta={debug_snapshot.get('stage3_gps_traj_delta', 0.0):.6f}"
+                        f"\tstage3_route_delta={debug_snapshot.get('stage3_route_traj_delta', 0.0):.6f}"
+                        f"\tvision_grad={debug_snapshot.get('vision_proj_grad_norm', 0.0):.6f}"
+                        f"\tts2img_grad={debug_snapshot.get('ts_to_image_grad_norm', 0.0):.6f}"
+                        f"\ttraj_img_cl={traj_image_cl_loss.item():.6f}"
+                    )
+                else:
+                    print(f'{t} | (Train) | Epoch={epoch}\tbatch_id={idx + 1}\tloss={loss.item():.4f}')
 
         scheduler.step()
 

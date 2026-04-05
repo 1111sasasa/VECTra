@@ -39,5 +39,7 @@
   "fusion_type": "cross_modal",
   "use_modality_embedding": true,
   "cross_modal_num_heads": 4,
-  "cross_modal_num_layers": 1
+  "cross_modal_num_layers": 1,
+  "use_vision_segment_encoder": false,
+  "vision_segment_window_size": 1
 }

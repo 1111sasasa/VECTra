@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.utils.rnn as rnn_utils
 
 from timeseries_image import LearnableTimeSeriesToImage
 
@@ -74,9 +75,12 @@ class TimeVLMVisionEncoder(nn.Module):
         if images.shape[1] != 3:
             raise ValueError("Vision encoder expects 3-channel images.")
 
-        img_min = images.amin(dim=(2, 3), keepdim=True)
-        img_max = images.amax(dim=(2, 3), keepdim=True)
-        images = (images - img_min) / (img_max - img_min + 1e-6)
+        # Remove per-image min-max normalization to preserve amplitude information
+        # img_min = images.amin(dim=(2, 3), keepdim=True)
+        # img_max = images.amax(dim=(2, 3), keepdim=True)
+        # images = (images - img_min) / (img_max - img_min + 1e-6)
+
+        # normalize with CLIP mean and std
         images = (images - self.clip_mean) / self.clip_std
 
         if self.freeze_clip:
@@ -85,3 +89,66 @@ class TimeVLMVisionEncoder(nn.Module):
                 return self.clip_model.encode_image(images)
 
         return self.clip_model.encode_image(images)
+
+
+class SegmentVisionEncoder(nn.Module):
+    def __init__(self, base_encoder: TimeVLMVisionEncoder, hidden_dim: int):
+        super().__init__()
+        self.base_encoder = base_encoder
+        self.output_dim = base_encoder.output_dim
+        # Projection is handled in JGRM model usually, but can be here too.
+
+    def forward(self, window_tensors, batch_route_lengths):
+        """
+        window_tensors: List of tensors (variable length GPS sequences).
+        batch_route_lengths: List of ints (segments per traj).
+
+        Returns:
+            segment_embs: (Batch, MaxSegLen, Hidden)
+            traj_emb: (Batch, Hidden) - Pooled from segments or CLS
+        """
+        # Batch the windows
+        # Pad sequence
+        padded_windows = rnn_utils.pad_sequence(
+            window_tensors, batch_first=True, padding_value=0.0
+        )
+        # (TotalSegs, MaxTime, Feats)
+
+        # Encode
+        # TimeVLMVisionEncoder expects (B, T, D) -> (B, Embed)
+        seg_embeddings = self.base_encoder(padded_windows)  # (TotalSegs, Embed)
+
+        # Reconstruct into (Batch, MaxSegLen, Embed)
+        max_segs = max(batch_route_lengths)
+        batch_size = len(batch_route_lengths)
+
+        output_tensor = torch.zeros(
+            (batch_size, max_segs, seg_embeddings.size(-1)),
+            device=seg_embeddings.device,
+            dtype=seg_embeddings.dtype,
+        )
+
+        start = 0
+        traj_embs_list = []
+
+        for i, length in enumerate(batch_route_lengths):
+            if length == 0:
+                traj_embs_list.append(
+                    torch.zeros(seg_embeddings.size(-1), device=seg_embeddings.device)
+                )
+                continue
+
+            end = start + length
+            segs = seg_embeddings[start:end]
+            output_tensor[i, :length, :] = segs
+
+            # Trajectory level pooling (Mean)
+            traj_mean = segs.mean(dim=0)
+            traj_embs_list.append(traj_mean)
+
+            start = end
+
+        traj_emb = torch.stack(traj_embs_list, dim=0)  # (Batch, Embed)
+
+        return output_tensor, traj_emb
+

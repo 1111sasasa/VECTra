@@ -5,10 +5,8 @@ import numpy as np
 import pandas as pd
 import time
 import pickle
-from utils import Logger
-import argparse
-from task import road_cls, speed_inf, time_est, seg_time, congestion_inf
-from evluation_utils import get_road, fair_sampling, get_seq_emb_from_traj_withRouteOnly, get_seq_emb_from_traj_withALLModel, prepare_data, get_route_rep_from_traj_withRouteOnly
+from task import time_est, seg_time, congestion_inf
+from evluation_utils import get_road, fair_sampling, get_seq_emb_from_traj_withRouteOnly, prepare_data, get_route_rep_from_traj_withRouteOnly
 import torch
 import os
 torch.set_num_threads(5)
@@ -97,19 +95,7 @@ def evaluation(city, exp_path, model_name, start_time):
     seq_embedding = get_seq_emb_from_traj_withRouteOnly(seq_model, test_data, batch_size=1024)
 
 
-    # task 4
-    # detour_base = pickle.load(
-    #     open('/home/shzheng2025/data/{}/detour_base_max5.pkl'.format(city), 'rb'))
-    #
-    # sim_srh.evaluation2(seq_embedding, None, seq_model, test_seq_data, num_nodes, detour_base, feature_df,
-    #                     detour_rate=0.15, fold=10)  # 当road_embedding为None的时候过模型处理，时间特征为空
-
-    # sim_srh is disabled for now because it can crash due to route feature shape mismatch.
-    # geometry_df = pd.read_csv("/home/shzheng2025/data/{}/edge_geometry.csv".format(city))
-    # trans_mat = np.load('/home/shzheng2025/data/{}/transition_prob_mat.npy'.format(city))
-    # trans_mat = torch.tensor(trans_mat)
-    # sim_srh.evaluation3(seq_embedding, None, seq_model, test_seq_data, num_nodes, trans_mat, feature_df, geometry_df,
-    #                    detour_rate=0.3, fold=10)  # 当road_embedding为None的时候过模型处理，时间特征为空
+    # task 4 has been moved to evaluation/sim_srh_evaluation.py
 
     end_time = time.time()
     print("cost time : {:.2f} s".format(end_time - start_time))
