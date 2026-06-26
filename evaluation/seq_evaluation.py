@@ -109,8 +109,8 @@ if __name__ == '__main__':
     # model_name = 'JTMR_xian_v1_20_100000_230811074048_19.pt'
 
     # chengdu
-    exp_path = '/home/shzheng2025/bias/exp/JTMR_chengdu_260313211251'
-    model_name = 'JTMR_chengdu_v1_20_100000_260313211251_19.pt'
+    exp_path = '/home/shzheng2025/test/ow/chengdu/stage3/exp/JTMR_chengdu_260519235224'
+    model_name = 'JTMR_chengdu_v1_hier_image_20_100000_260519235224_19.pt'
     #
     # exp_path = '/home/shzheng2025/bias/exp/JTMR_chengdu_230817040154'
     # model_name = 'JTMR_chengdu_v1_20_100000_230817040154_19.pt'

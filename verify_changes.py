@@ -33,6 +33,7 @@ try:
         use_modality_embedding=config.get('use_modality_embedding', True),
         cross_modal_num_heads=config.get('cross_modal_num_heads', 4),
         cross_modal_num_layers=config.get('cross_modal_num_layers', 1),
+        enable_stage2_fusion=config.get('enable_stage2_fusion', True),
     )
 
     print("Successfully instantiated JGRMModel.")

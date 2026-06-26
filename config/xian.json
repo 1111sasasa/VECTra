@@ -41,5 +41,6 @@
   "cross_modal_num_heads": 4,
   "cross_modal_num_layers": 1,
   "use_vision_segment_encoder": false,
-  "vision_segment_window_size": 1
+  "vision_segment_window_size": 1,
+  "enable_stage2_fusion": true
 }

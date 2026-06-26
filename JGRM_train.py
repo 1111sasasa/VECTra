@@ -105,6 +105,7 @@ def train(config):
 
     use_vision_segment_encoder = config.get('use_vision_segment_encoder', False)
     vision_segment_window_size = config.get('vision_segment_window_size', 1)
+    enable_stage2_fusion = config.get('enable_stage2_fusion', True)
 
     verbose = config['verbose']
     version = config['version']
@@ -157,7 +158,8 @@ def train(config):
                       fusion_type=fusion_type, use_modality_embedding=use_modality_embedding,
                       cross_modal_num_heads=cross_modal_num_heads, cross_modal_num_layers=cross_modal_num_layers,
                       use_vision_segment_encoder=use_vision_segment_encoder,
-                      vision_segment_window_size=vision_segment_window_size).cuda()
+                      vision_segment_window_size=vision_segment_window_size,
+                      enable_stage2_fusion=enable_stage2_fusion).cuda()
     # Modify it to your own directory
     init_road_emb = torch.load('/home/shzheng2025/data/{}/init_w2v_road_emb.pt'.format(city), map_location='cuda:{}'.format(dev_id))
     model.node_embedding.weight = torch.nn.Parameter(init_road_emb['init_road_embd'])
@@ -325,8 +327,7 @@ def train(config):
                 writer.add_scalar('debug/image_branch_active', debug_snapshot.get('image_branch_active', 0.0), step)
                 writer.add_scalar('debug/image_context_norm', debug_snapshot.get('image_context_norm', 0.0), step)
                 writer.add_scalar('debug/stage2_seg_delta', debug_snapshot.get('stage2_seg_delta', 0.0), step)
-                writer.add_scalar('debug/stage3_gps_traj_delta', debug_snapshot.get('stage3_gps_traj_delta', 0.0), step)
-                writer.add_scalar('debug/stage3_route_traj_delta', debug_snapshot.get('stage3_route_traj_delta', 0.0), step)
+                writer.add_scalar('debug/fused_seg_norm', debug_snapshot.get('fused_seg_norm', 0.0), step)
                 writer.add_scalar('debug/vision_proj_grad_norm', debug_snapshot.get('vision_proj_grad_norm', 0.0), step)
                 writer.add_scalar('debug/ts_to_image_grad_norm', debug_snapshot.get('ts_to_image_grad_norm', 0.0), step)
 
@@ -338,8 +339,7 @@ def train(config):
                         f"\timg_active={debug_snapshot.get('image_branch_active', 0.0):.0f}"
                         f"\timg_norm={debug_snapshot.get('image_context_norm', 0.0):.4f}"
                         f"\tstage2_delta={debug_snapshot.get('stage2_seg_delta', 0.0):.6f}"
-                        f"\tstage3_gps_delta={debug_snapshot.get('stage3_gps_traj_delta', 0.0):.6f}"
-                        f"\tstage3_route_delta={debug_snapshot.get('stage3_route_traj_delta', 0.0):.6f}"
+                        f"\tfused_norm={debug_snapshot.get('fused_seg_norm', 0.0):.6f}"
                         f"\tvision_grad={debug_snapshot.get('vision_proj_grad_norm', 0.0):.6f}"
                         f"\tts2img_grad={debug_snapshot.get('ts_to_image_grad_norm', 0.0):.6f}"
                         f"\ttraj_img_cl={traj_image_cl_loss.item():.6f}"

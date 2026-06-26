@@ -5,7 +5,7 @@
   "data_path": "/home/shzheng2025/data/chengdu/chengdu_1101_1115_data_sample10w.pkl",
   "adj_path": "/home/shzheng2025/data/chengdu/line_graph_edge_idx.npy",
   "retrain": 1,
-  "save_path": "/home/shzheng2025/bias/exp/",
+  "save_path": "/home/shzheng2025/test/ow/chengdu/stage3/exp/",
   "batch_size":64,
   "num_worker":0,
   "route_min_len": 10,
@@ -62,5 +62,6 @@
   "cross_modal_num_heads": 4,
   "cross_modal_num_layers": 1,
   "use_vision_segment_encoder": false,
-  "vision_segment_window_size": 1
+  "vision_segment_window_size": 1,
+  "enable_stage2_fusion": true
 }

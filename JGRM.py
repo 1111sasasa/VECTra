@@ -25,7 +25,8 @@ class JGRMModel(BaseModel):
                  use_vision_pair_fuse=False, use_vision_pair_gate=True,
                  fusion_type='shared', use_modality_embedding=True, cross_modal_num_heads=4,
                  cross_modal_num_layers=1,
-                 use_vision_segment_encoder=False, vision_segment_window_size=1):
+                 use_vision_segment_encoder=False, vision_segment_window_size=1,
+                 enable_stage2_fusion=True):
         super(JGRMModel, self).__init__()
 
         self.vocab_size = vocab_size
@@ -51,6 +52,7 @@ class JGRMModel(BaseModel):
         self.fusion_type = fusion_type
         self.use_modality_embedding = use_modality_embedding
         self.use_vision_segment_encoder = use_vision_segment_encoder
+        self.enable_stage2_fusion = enable_stage2_fusion
         self.debug_stats = {}
         self.debug_tensors = {}
 
@@ -93,12 +95,6 @@ class JGRMModel(BaseModel):
         )
 
         self.segment_image_fusion = CrossModalTrajectoryFusion(
-            hidden_size=hidden_size,
-            num_heads=cross_modal_num_heads,
-            dropout=drop_road_rate,
-            num_layers=cross_modal_num_layers,
-        )
-        self.traj_image_fusion = CrossModalTrajectoryFusion(
             hidden_size=hidden_size,
             num_heads=cross_modal_num_heads,
             dropout=drop_road_rate,
@@ -536,15 +532,15 @@ class JGRMModel(BaseModel):
 
     def hierarchical_fuse_with_image(self, gps_road_joint_rep, route_road_joint_rep, gps_traj_joint_rep,
                                      route_traj_joint_rep, route_assign_mat, vision_traj_rep):
-        if vision_traj_rep is None:
+        if vision_traj_rep is None or not self.enable_stage2_fusion:
             self.debug_tensors = {}
             self._update_debug_stats(
-                image_branch_active=0.0,
-                image_context_norm=0.0,
+                image_branch_active=0.0 if vision_traj_rep is None else 1.0,
+                image_context_norm=self._tensor_mean_norm(vision_traj_rep) if vision_traj_rep is not None else 0.0,
                 stage2_seg_delta=0.0,
-                stage3_traj_delta=0.0,
-                gps_joint_norm=0.0,
-                route_joint_norm=0.0,
+                fused_seg_norm=0.0,
+                gps_joint_norm=self._tensor_mean_norm(gps_traj_joint_rep),
+                route_joint_norm=self._tensor_mean_norm(route_traj_joint_rep),
             )
             return gps_road_joint_rep, gps_traj_joint_rep, route_road_joint_rep, route_traj_joint_rep
 
@@ -552,8 +548,6 @@ class JGRMModel(BaseModel):
         road_mask = (route_assign_mat[:, :segment_seq_len] == self.vocab_size)
         h_seg = 0.5 * (gps_road_joint_rep + route_road_joint_rep)
         h_seg_before = h_seg.clone()
-        gps_traj_before = gps_traj_joint_rep.clone()
-        route_traj_before = route_traj_joint_rep.clone()
 
         image_context = vision_traj_rep.unsqueeze(1)
         h_seg_prime = self.segment_image_fusion(
@@ -563,35 +557,18 @@ class JGRMModel(BaseModel):
             context_key_padding_mask=torch.zeros((vision_traj_rep.shape[0], 1), dtype=torch.bool, device=vision_traj_rep.device),
         )
 
-        valid_mask = (~road_mask).unsqueeze(-1).float()
-        traj_token = (h_seg_prime * valid_mask).sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1.0)
-        traj_token = self.traj_image_fusion(
-            query_tokens=traj_token.unsqueeze(1),
-            context_tokens=image_context,
-            query_key_padding_mask=torch.zeros((traj_token.shape[0], 1), dtype=torch.bool, device=traj_token.device),
-            context_key_padding_mask=torch.zeros((vision_traj_rep.shape[0], 1), dtype=torch.bool, device=vision_traj_rep.device),
-        ).squeeze(1)
-
-        gps_traj_joint_rep = gps_traj_joint_rep + traj_token
-        route_traj_joint_rep = route_traj_joint_rep + traj_token
         gps_road_joint_rep = gps_road_joint_rep + h_seg_prime
         route_road_joint_rep = route_road_joint_rep + h_seg_prime
 
         self.debug_tensors = {
             'vision_traj_rep': vision_traj_rep,
             'h_seg_prime': h_seg_prime,
-            'traj_token_after_stage3': traj_token,
-            'gps_traj_joint_rep': gps_traj_joint_rep,
-            'route_traj_joint_rep': route_traj_joint_rep,
         }
         self._update_debug_stats(
             image_branch_active=1.0,
             image_context_norm=self._tensor_mean_norm(vision_traj_rep),
             stage2_seg_delta=self._tensor_mean_abs_delta(h_seg_before, h_seg_prime, mask=road_mask),
-            stage3_gps_traj_delta=self._tensor_mean_abs_delta(gps_traj_before, gps_traj_joint_rep),
-            stage3_route_traj_delta=self._tensor_mean_abs_delta(route_traj_before, route_traj_joint_rep),
             fused_seg_norm=self._tensor_mean_norm(h_seg_prime, mask=road_mask),
-            fused_traj_norm=self._tensor_mean_norm(traj_token),
             gps_joint_norm=self._tensor_mean_norm(gps_traj_joint_rep),
             route_joint_norm=self._tensor_mean_norm(route_traj_joint_rep),
         )
